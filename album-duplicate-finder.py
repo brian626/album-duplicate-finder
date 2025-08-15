@@ -67,7 +67,7 @@ def find_potential_duplicates(
         except IndexError:
             # Handle entries that don't follow the "Artist - Album" format
             print(f"Warning: Line {line_num}: \
-                  Entry doesn't follow 'Artist - Album' format: {original}")
+Entry doesn't follow 'Artist - Album' format: {original}")
             continue
 
     # Find potential duplicates within each artist group
@@ -132,7 +132,7 @@ def main():
     # Prepare output
     output_lines = []
     output_lines.append(f"Found {len(potential_duplicates)} potential \
-                        duplicate groups:")
+duplicate groups:")
     output_lines.append("-" * 50)
 
     for i, group in enumerate(potential_duplicates, 1):
