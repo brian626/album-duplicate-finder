@@ -1,101 +1,112 @@
+import os
 import re
 import unicodedata
 from difflib import SequenceMatcher
-import argparse
 from collections import defaultdict
+
+# Google API Imports
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+# If modifying these scopes, delete the file token.json.
+# We only need read-only access to look for duplicates.
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+
+# -------------------------------------------------------------
+# Paste your Spreadsheet ID here. 
+# Found in the URL: https://docs.google.com/spreadsheets/d/[SPREADSHEET_ID]/edit
+# -------------------------------------------------------------
+SPREADSHEET_ID = '1YzeNXeZ3Ff1ZAjiDI9QDMjs4_JOHE8TGgwrUVLCRXBQ'
+
+def get_sheets_service():
+    """Handles OAuth2 authentication and returns the Sheets API service."""
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+
+    try:
+        service = build('sheets', 'v4', credentials=creds)
+        return service
+    except HttpError as err:
+        print(f"An error occurred connecting to Google Sheets: {err}")
+        return None
 
 
 def normalize_text(text):
-    """
-    Normalize text by:
-    1. Converting to lowercase
-    2. Removing accents
-    3. Removing extra spaces
-    """
-    # Convert to lowercase
     text = text.lower()
-
-    # Remove accents
     text = unicodedata.normalize('NFKD', text)
     text = ''.join([c for c in text if not unicodedata.combining(c)])
-
-    # Remove extra spaces
     text = re.sub(r'\s+', ' ', text).strip()
-
     return text
 
 
 def is_header(text):
-    """Check if text matches known header patterns"""
     normalized = normalize_text(text)
-    return normalized in ["artist - title", "artist - album"]
+    return normalized in ["artist - title", "artist - album", "album", "artist"]
 
 
-def find_potential_duplicates(
-        albums_with_line_numbers,
-        similarity_threshold=0.85
-):
+def find_potential_duplicates(albums_with_locations, similarity_threshold=0.85):
     """
-    Find potential duplicates in a list of albums based on similarity.
-    Returns groups of potential duplicates.
-
-    albums_with_line_numbers: List of tuples (line_number, album_text)
+    albums_with_locations: List of tuples (tab_name, row_number, album_text)
     """
-    # Filter out all headers
     filtered_albums = []
     header_count = 0
 
-    for line_num, album in albums_with_line_numbers:
+    for tab, row, album in albums_with_locations:
         if is_header(album):
             header_count += 1
         else:
-            filtered_albums.append((line_num, album))
+            filtered_albums.append((tab, row, album))
 
     if header_count > 0:
-        print(f"Detected and skipped {header_count} header row(s)")
+        print(f"Detected and skipped {header_count} header row(s)\n")
 
-    # Normalize all albums
-    normalized_albums = [(line_num, album, normalize_text(album))
-                         for line_num, album in filtered_albums]
+    # Normalize entries
+    normalized_albums = [(tab, row, original, normalize_text(original))
+                         for tab, row, original in filtered_albums]
 
-    # Group albums by artist for faster processing
+    # Group by artist
     artist_groups = defaultdict(list)
-    for line_num, original, normalized in normalized_albums:
+    for tab, row, original, normalized in normalized_albums:
         try:
-            artist = normalized.split(' - ')[0].strip()
-            artist_groups[artist].append((line_num, original, normalized))
-        except IndexError:
-            # Handle entries that don't follow the "Artist - Album" format
-            print(f"Warning: Line {line_num}: \
-Entry doesn't follow 'Artist - Album' format: {original}")
+            # Assumes format "Artist - Album". If no delimiter, whole string is treated as artist group
+            artist = normalized.split(' - ')[0].strip() if ' - ' in normalized else normalized
+            artist_groups[artist].append((tab, row, original, normalized))
+        except Exception:
             continue
 
-    # Find potential duplicates within each artist group
     potential_duplicates = []
 
     for artist, albums in artist_groups.items():
-        # If there's only one album by this artist, skip
         if len(albums) <= 1:
             continue
 
-        # Compare each pair of albums by this artist
         for i in range(len(albums)):
-            line_num_i, original_i, normalized_i = albums[i]
-            album_i = normalized_i.split(' - ', 1)[1] \
-                if ' - ' in normalized_i else normalized_i
+            tab_i, row_i, original_i, normalized_i = albums[i]
+            album_i = normalized_i.split(' - ', 1)[1] if ' - ' in normalized_i else normalized_i
 
-            duplicates_for_i = [(line_num_i, original_i)]
+            duplicates_for_i = [(tab_i, row_i, original_i)]
 
             for j in range(i + 1, len(albums)):
-                line_num_j, original_j, normalized_j = albums[j]
-                album_j = normalized_j.split(' - ', 1)[1] \
-                    if ' - ' in normalized_j else normalized_j
+                tab_j, row_j, original_j, normalized_j = albums[j]
+                album_j = normalized_j.split(' - ', 1)[1] if ' - ' in normalized_j else normalized_j
 
-                # Calculate similarity between album titles
                 similarity = SequenceMatcher(None, album_i, album_j).ratio()
 
                 if similarity >= similarity_threshold:
-                    duplicates_for_i.append((line_num_j, original_j))
+                    duplicates_for_i.append((tab_j, row_j, original_j))
 
             if len(duplicates_for_i) > 1:
                 potential_duplicates.append(duplicates_for_i)
@@ -104,54 +115,55 @@ Entry doesn't follow 'Artist - Album' format: {original}")
 
 
 def main():
-    parser = \
-        argparse.ArgumentParser(description='Find duplicate albums in a list.')
-    parser.add_argument('input_file',
-                        help='Path to file containing album list')
-    parser.add_argument('--threshold',
-                        type=float,
-                        default=0.85,
-                        help='Similarity threshold (0.0-1.0, higher is more \
-                            strict)')
-    parser.add_argument('--output',
-                        help='Output file for results (optional)')
+    if SPREADSHEET_ID == 'YOUR_SPREADSHEET_ID_HERE':
+        print("Please replace SPREADSHEET_ID with your actual Google Sheet ID.")
+        return
 
-    args = parser.parse_args()
+    service = get_sheets_service()
+    if not service:
+        return
 
-    # Read the album list with line numbers (1-based for human readability)
-    albums_with_line_numbers = []
-    with open(args.input_file, 'r', encoding='utf-8') as f:
-        for line_num, line in enumerate(f, 1):
-            if line.strip():
-                albums_with_line_numbers.append((line_num, line.strip()))
+    print("Fetching sheet metadata...")
+    try:
+        # 1. Get all Tab (Sheet) names automatically
+        sheet_metadata = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+        sheets = sheet_metadata.get('sheets', '')
+        tab_names = [sheet['properties']['title'] for sheet in sheets]
+        
+        # 2. Pull data from all tabs in a single batch call to save API quota
+        # Assumes your album titles are in Column A. Change 'A:A' if they are in 'B:B', etc.
+        ranges = [f"'{tab}'!A:A" for tab in tab_names]
+        print(f"Reading data from tabs: {', '.join(tab_names)}...")
+        
+        result = service.spreadsheets().values().batchGet(
+            spreadsheetId=SPREADSHEET_ID, ranges=ranges).execute()
+        value_ranges = result.get('valueRanges', [])
 
-    # Find potential duplicates
-    potential_duplicates = find_potential_duplicates(albums_with_line_numbers,
-                                                     args.threshold)
+        # 3. Parse the data into a master list tracking (tab, row, value)
+        albums_with_locations = []
+        for tab_name, value_range in zip(tab_names, value_ranges):
+            rows = value_range.get('values', [])
+            for row_num, row_data in enumerate(rows, 1): # 1-indexed for spreadsheet matching
+                if row_data and str(row_data[0]).strip():
+                    albums_with_locations.append((tab_name, row_num, str(row_data[0]).strip()))
 
-    # Prepare output
-    output_lines = []
-    output_lines.append(f"Found {len(potential_duplicates)} potential \
-duplicate groups:")
-    output_lines.append("-" * 50)
+    except HttpError as err:
+        print(f"API Error: {err}")
+        return
+
+    # Run your duplicate logic
+    threshold = 0.85
+    potential_duplicates = find_potential_duplicates(albums_with_locations, threshold)
+
+    # Print results
+    print(f"Found {len(potential_duplicates)} potential duplicate groups:")
+    print("-" * 60)
 
     for i, group in enumerate(potential_duplicates, 1):
-        output_lines.append(f"Group {i}:")
-        for line_num, album in group:
-            # Line numbers are already correct since we preserved them
-            # from the file
-            output_lines.append(f"  Line {line_num}: {album}")
-        output_lines.append("")
-
-    # Output results
-    output_text = "\n".join(output_lines)
-
-    if args.output:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            f.write(output_text)
-        print(f"Results written to {args.output}")
-    else:
-        print(output_text)
+        print(f"Group {i}:")
+        for tab, row, album in group:
+            print(f"  [{tab}] Row {row}: {album}")
+        print("")
 
 
 if __name__ == "__main__":
