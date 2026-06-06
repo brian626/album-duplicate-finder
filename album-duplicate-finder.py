@@ -1,3 +1,4 @@
+import argparse 
 import os
 import re
 import unicodedata
@@ -115,8 +116,30 @@ def find_potential_duplicates(albums_with_locations, similarity_threshold=0.85):
 
 
 def main():
-    if SPREADSHEET_ID == 'YOUR_SPREADSHEET_ID_HERE':
-        print("Please replace SPREADSHEET_ID with your actual Google Sheet ID.")
+    parser = argparse.ArgumentParser(
+        description='Find duplicate music albums across all tabs of a Google Sheet using fuzzy matching.'
+    )
+    parser.add_argument(
+        '--id', 
+        metavar='SPREADSHEET_ID',
+        help='The Google Spreadsheet ID. If not provided, defaults to the hardcoded ID in the script.'
+    )
+    parser.add_argument(
+        '--threshold', 
+        type=float, 
+        default=0.85,
+        help='Similarity threshold (0.0-1.0). Higher is more strict. Default is 0.85.'
+    )
+
+    args = parser.parse_args()
+
+    # Determine which Spreadsheet ID to use
+    spreadsheet_id = args.id if args.id else SPREADSHEET_ID
+
+    if not spreadsheet_id or spreadsheet_id == 'YOUR_SPREADSHEET_ID_HERE':
+        print("Error: Please provide a Spreadsheet ID either by editing the SPREADSHEET_ID ")
+        print("variable in the script or by passing it via the --id argument.")
+        print("\nRun 'python album-duplicate-finder.py --help' for usage instructions.")
         return
 
     service = get_sheets_service()
@@ -126,24 +149,23 @@ def main():
     print("Fetching sheet metadata...")
     try:
         # 1. Get all Tab (Sheet) names automatically
-        sheet_metadata = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+        sheet_metadata = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         sheets = sheet_metadata.get('sheets', '')
         tab_names = [sheet['properties']['title'] for sheet in sheets]
         
-        # 2. Pull data from all tabs in a single batch call to save API quota
-        # Assumes your album titles are in Column A. Change 'A:A' if they are in 'B:B', etc.
+        # 2. Pull data from all tabs in a single batch call
         ranges = [f"'{tab}'!A:A" for tab in tab_names]
         print(f"Reading data from tabs: {', '.join(tab_names)}...")
         
         result = service.spreadsheets().values().batchGet(
-            spreadsheetId=SPREADSHEET_ID, ranges=ranges).execute()
+            spreadsheetId=spreadsheet_id, ranges=ranges).execute()
         value_ranges = result.get('valueRanges', [])
 
         # 3. Parse the data into a master list tracking (tab, row, value)
         albums_with_locations = []
         for tab_name, value_range in zip(tab_names, value_ranges):
             rows = value_range.get('values', [])
-            for row_num, row_data in enumerate(rows, 1): # 1-indexed for spreadsheet matching
+            for row_num, row_data in enumerate(rows, 1):
                 if row_data and str(row_data[0]).strip():
                     albums_with_locations.append((tab_name, row_num, str(row_data[0]).strip()))
 
@@ -151,12 +173,11 @@ def main():
         print(f"API Error: {err}")
         return
 
-    # Run your duplicate logic
-    threshold = 0.85
-    potential_duplicates = find_potential_duplicates(albums_with_locations, threshold)
+    # Run duplicate logic with the CLI-specified threshold
+    potential_duplicates = find_potential_duplicates(albums_with_locations, args.threshold)
 
     # Print results
-    print(f"Found {len(potential_duplicates)} potential duplicate groups:")
+    print(f"Found {len(potential_duplicates)} potential duplicate groups (Threshold: {args.threshold}):")
     print("-" * 60)
 
     for i, group in enumerate(potential_duplicates, 1):
